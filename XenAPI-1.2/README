@@ -1,0 +1,7 @@
+XenAPI SDK
+==========
+
+This is used for communication with Citrix XenServer and Xen Cloud Platform.
+
+License: LGPL 2.1
+See also: http://community.citrix.com/display/xs/Download+SDKs
