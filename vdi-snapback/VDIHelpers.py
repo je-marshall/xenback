@@ -16,7 +16,7 @@ class VDI:
 		self.vdi_ref = vdi_ref
 		self.vdi_dict = vdi_dict
 		self.uuid = vdi_dict["uuid"]
-		self.naem = vdi_dict["name_label"]
+		self.name = vdi_dict["name_label"]
 
 
 	def expose(self, host, network):
@@ -136,14 +136,14 @@ class VM:
 
 		return snapshot_list
 	
-	def vdi_from_ref(self, vdi_ref, all_vdis):
-		# Returns a VDI dict from an opaqueref
-		
-		for opaqueref, vdi in all_vdis.items():
-			if vdi_ref in opaqueref:
-				return_vdi = vdi
+def vdi_from_ref(vdi_ref, all_vdis):
+	# Returns a VDI dict from an opaqueref
+	
+	for opaqueref, vdi in all_vdis.items():
+		if vdi_ref in opaqueref:
+			return_vdi = vdi
 
-		return return_vdi
+	return return_vdi
 
 def get_network_uuid(session):
 	# For now this is dumb and picks the one on eth0
