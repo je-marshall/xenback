@@ -1,6 +1,6 @@
 #!/bin/env python2.7
 
-import VDIHelpers
+import SnapbackHelpers
 import XenAPI
 import ConfigParser
 
@@ -27,7 +27,7 @@ def run_backup(session, vm_exclude, network, host):
 
 	all_vms = session.xenapi.VM.get_all_records()
 	backup_vms = {}
-	
+
 	for opaqueref, vm in all_vms.items():
 		for match in vm_exclude:
 			if match in vm['name_label'] or match in vm['uuid']:
@@ -39,7 +39,7 @@ def run_backup(session, vm_exclude, network, host):
 	backup_vdi_list = []
 
 	for opaqueref, vm in backup_vms.items():
-		this_vm = VDIHelpers.VM(session, opaqueref, vm)
+		this_vm = SnapbackHelpers.VM(session, opaqueref, vm)
 		this_vm.get_vbd_list(all_vbds)
 
 		try:
@@ -64,7 +64,7 @@ def run_backup(session, vm_exclude, network, host):
 		backup_vdis[vdi] = vdi_dict
 
 	for opaqueref, vdi in backup_vdis.items():
-		this_vdi = VDIHelpers.VDI(session, opaqueref, vdi)
+		this_vdi = SnapbackHelpers.VDI(session, opaqueref, vdi)
 
 		try:
 			expose_ref = this_vdi.expose(host, network)
@@ -77,4 +77,9 @@ def main():
 		Handles parsing config and shoving it into the main loop
 	'''
 	
+	session = XenAPI.Session(host)
+	session.login_with_password(user, password)
+	# Assuming the first host in the set is the currently connected host.
+	# TODO: Does this work on XenServer pools??
+	host_ref = session.xenapi.host.get_all()[0]
 	
