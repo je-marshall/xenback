@@ -50,28 +50,6 @@ class VDI:
 			# Log 
 			return False
 
-	def get_record(self, vdi_ref, host):
-		# Returns the record data associated with an exposed VDI
-		args = {'record_handle' : vdi_ref}
-
-		try:
-			xml = self.session.host.call_plugin(host, 'transfer', 'get_record', args)
-		except Exception, e:
-			# log and ha ndle error
-			pass
-		
-		record = {}
-		doc = minidom.parseString(xml)
-
-		try:
-			el = doc.getElementsByTagName('transfer_record')[0]
-			for k, v in el.attributes.items():
-				record[str(k)] = str(v)
-		finally:
-			doc.unlink()
-
-		return record
-
 class VM:
 	''' 
 		Simple holding class for VM operations
@@ -145,10 +123,33 @@ def vdi_from_ref(vdi_ref, all_vdis):
 
 	return return_vdi
 
+def get_record(session, expose_ref, host):
+	# Returns the record data associated with an exposed VDI
+	args = {'record_handle' : expose_ref}
+
+	try:
+		xml = session.xenapi.host.call_plugin(host, 'transfer', 'get_record', args)
+	except Exception, e:
+		# log and handle error
+		return False
+	
+	print xml
+	record = {}
+	doc = minidom.parseString(xml)
+
+	try:
+		el = doc.getElementsByTagName('transfer_record')[0]
+		for k, v in el.attributes.items():
+			record[str(k)] = str(v)
+	finally:
+		doc.unlink()
+
+	return record
+
 def get_network_uuid(session):
 	# For now this is dumb and picks the one on eth0
 
-	for ref, network in session.xenapi.network.get_all_records():
+	for ref, network in session.xenapi.network.get_all_records().items():
 		if 'eth0' in network["name_label"]:
 			return network["uuid"]
 

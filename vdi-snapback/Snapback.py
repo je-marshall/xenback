@@ -19,11 +19,14 @@ import ConfigParser
 #	user = config.get('Host', 'user')
 #	passwd = config.get('Host', 'pass')
 
-def run_backup(session, vm_exclude, network, host):
+def run_backup(session, vm_exclude, network, host, dest):
 	'''
 		Runs the main backup loop, excluding any VM's that have been pulled from
 		the config file
 	'''
+
+	### Perhaps it is worth changing this to be one massive for loop, as it
+	### would be helpful to have VM names available when downloading files
 
 	all_vms = session.xenapi.VM.get_all_records()
 	backup_vms = {}
@@ -71,6 +74,14 @@ def run_backup(session, vm_exclude, network, host):
 		except:
 			print "Could not expose %s VDI" % this_vdi.name
 			continue
+
+		this_record = SnapbackHelpers.get_record(session, expose_ref, host)
+		this_url = next(v for k,v in this_record.items() if 'url_full' in k)
+
+		try:
+			SnapbackHelpers.download_file(url, dest)
+		
+
 
 def main():
 	'''
