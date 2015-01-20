@@ -17,7 +17,8 @@ class VDI:
 		self.vdi_dict = vdi_dict
 		self.uuid = vdi_dict["uuid"]
 		self.name = vdi_dict["name_label"]
-
+		self.is_exposed = False
+		self.exposed_ref = False
 
 	def expose(self, host, network):
 		# Exposes this vdi as a vhd
@@ -32,17 +33,20 @@ class VDI:
 		except Exception, e:
 			# log and handle error
 			return e
+		
+		self.is_exposed = True
+		self.expose_ref = expose_ref
 
-		return expose_ref
+		return True
 	
-	def unexpose(self, vdi_ref, host):
+	def unexpose(self, host):
 		# Unexposes a vdi
-		args = {'record_handle' : vdi_ref}
+		args = {'record_handle' : self.expose_ref}
 		try:
 			response = self.session.xenapi.host.call_plugin(host, 'transfer', 'unexpose', args)
 		except Exception, e:
 			# log and handle error
-			pass
+			return False
 
 		if response == 'OK':
 			return True
@@ -76,16 +80,20 @@ class VM:
 		try:
 			self.session.xenapi.VM.pause(self.vm_ref)
 		except Exception, e:
-			pass
+			return False	
 			# log error
+
+		return True
 
 	def unpause(self):
 		# Resumes the VM
 		try:
 			self.session.xenapi.VM.unpause(self.vm_ref)
 		except Exception, e:
-			pass
+			return False
 			# log error
+
+		return True
 	
 	def snapshot_vdi(self, all_disks=False):
 		# Snapshots the first disk of the VM unless told otherwise, then returns
@@ -100,7 +108,7 @@ class VM:
 						return_ref = self.session.xenapi.VDI.snapshot(vbd["VDI"])
 						snapshot_list.append(return_ref)
 					except Exception, e:
-						pass
+						return False
 						# insert logging and error handling here
 
 		else:
@@ -109,19 +117,19 @@ class VM:
 					return_ref = self.session.xenapi.VDI.snapshot(vbd["VDI"])
 					snapshot_list.append(return_ref)
 				except Exception, e:
-					pass
+					return False	
 					# insert logging and error handling here
 
 		return snapshot_list
 	
-def vdi_from_ref(vdi_ref, all_vdis):
-	# Returns a VDI dict from an opaqueref
-	
-	for opaqueref, vdi in all_vdis.items():
-		if vdi_ref in opaqueref:
-			return_vdi = vdi
-
-	return return_vdi
+#def vdi_from_ref(vdi_ref, all_vdis):
+#	# Returns a VDI dict from an opaqueref
+#	
+#	for opaqueref, vdi in all_vdis.items():
+#		if vdi_ref in opaqueref:
+#			return_vdi = vdi
+#
+#	return return_vdi
 
 def get_record(session, expose_ref, host):
 	# Returns the record data associated with an exposed VDI

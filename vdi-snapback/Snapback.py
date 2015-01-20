@@ -39,48 +39,45 @@ def run_backup(session, vm_exclude, network, host, dest):
 				backup_vms[opaqueref] = vm
 	
 	all_vbds = session.xenapi.VBD.get_all_records()
-	backup_vdi_list = []
 
 	for opaqueref, vm in backup_vms.items():
 		this_vm = SnapbackHelpers.VM(session, opaqueref, vm)
 		this_vm.get_vbd_list(all_vbds)
 
-		try:
-			this_vm.pause()
-		except:
-			print "Pause failed for %s VM, skipping" % this_vm.name
+		if not this_vm.pause():
+			print "Skipping VM %s : could not pause" % this_vm.name
 			continue
 
-		try:
-			this_snapshot_vdi = this_vm.snapshot_vdi()
-			backup_vdi_list.append(this_snapshot_vdi)
-		except:
-			print "Snapshotting failed for %s VM, skipping" % this_vm.name
-		finally:
-			this_vm.unpause()
-	
-	backup_vdis = {}
-	all_vdis = session.xenapi.VDI.get_all_records()
+		this_vdi_ref = this_vm.snapshot()
 
-	for vdi in backup_vdi_list:
-		vdi_dict = vdi_from_ref(vdi, all_vdis)
-		backup_vdis[vdi] = vdi_dict
-
-	for opaqueref, vdi in backup_vdis.items():
-		this_vdi = SnapbackHelpers.VDI(session, opaqueref, vdi)
-
-		try:
-			expose_ref = this_vdi.expose(host, network)
-		except:
-			print "Could not expose %s VDI" % this_vdi.name
+		if not this_vdi:
+			print "Snapshotting failed for VM %s" % this_vm.name
+			if not this_vm.unpause():
+				print "Unpausing also failed for VM %s, requires manual intervention" % this_vm.name
+				continue
 			continue
+		
+		this_vdi_dict = session.xenapi.VDI.get_record(this_vdi_ref)
+		this_vdi = SnapbackHelpers.VDI(session, this_vdi_ref, this_vdi_dict)
+		
+		expose_ref = this_vdi.expose(host, network)
 
+		if not expose_ref:
+			print "Failed to expose VDI for %s" % this_vm.name
+			continue
+		
 		this_record = SnapbackHelpers.get_record(session, expose_ref, host)
 		this_url = next(v for k,v in this_record.items() if 'url_full' in k)
-
-		try:
-			SnapbackHelpers.download_file(url, dest)
 		
+		full_path = dest + this_vm.name + str(test_record['snapshot_time'])
+
+		print "Downloading snapshot for VM %s to destination %s" % (this_vm.name, full_path)
+
+		SnapbackHelpers.download_file(this_url, full_path)
+
+		if not this_vdi.unexpose():
+			print "Unexpose failed for %s, manual intervention required"
+			
 
 
 def main():
@@ -94,3 +91,6 @@ def main():
 	# TODO: Does this work on XenServer pools??
 	host_ref = session.xenapi.host.get_all()[0]
 	
+
+if __name__ == '__main__':
+	main()
