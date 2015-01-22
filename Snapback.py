@@ -1,6 +1,8 @@
 #!/bin/env python2.7
 
 import XenAPI
+import os
+import datetime
 import sys
 import logging
 import time
@@ -58,10 +60,41 @@ class VDI:
 			return False
 
 		if response == 'OK':
+			self.is_exposed = False
 			return True
 		else:
-			# Log 
+			log.error("Unexpose failed: %s" % response)
 			return False
+
+	def get_expose_record(self, host):
+		# Returns the record data associated with an exposed VDI
+		log = logging.getLogger(__name__)
+
+		if not self.is_exposed:
+			log.error("Tried to get a record for a non-exposed VDI: %s" % self.uuid)
+			return False
+	
+		args = {'record_handle' : self.expose_ref}
+
+		try:
+			xml = session.xenapi.host.call_plugin(host, 'transfer', 'get_record', args)
+		except Exception, e:
+			log.error("Failed to parse XML stream")
+			log.error(e)
+			return False
+		
+		print xml
+		record = {}
+		doc = minidom.parseString(xml)
+	
+		try:
+			el = doc.getElementsByTagName('transfer_record')[0]
+			for k, v in el.attributes.items():
+				record[str(k)] = str(v)
+		finally:
+			doc.unlink()
+	
+		return record
 
 	def destroy(self):
 		# Destroys a VDI
@@ -132,34 +165,8 @@ class VM:
 					return False
 
 
-def get_record(session, expose_ref, host):
-	# Returns the record data associated with an exposed VDI
-	log = logging.getLogger(__name__)
-	args = {'record_handle' : expose_ref}
-
-	try:
-		xml = session.xenapi.host.call_plugin(host, 'transfer', 'get_record', args)
-	except Exception, e:
-		log.error("Failed to parse XML stream")
-		log.error(e)
-		return False
-	
-	print xml
-	record = {}
-	doc = minidom.parseString(xml)
-
-	try:
-		el = doc.getElementsByTagName('transfer_record')[0]
-		for k, v in el.attributes.items():
-			record[str(k)] = str(v)
-	finally:
-		doc.unlink()
-
-	return record
-
 def get_network_uuid(session):
 	# For now this is dumb and picks the one on eth0
-
 	for ref, network in session.xenapi.network.get_all_records().items():
 		if 'eth0' in network["name_label"]:
 			return network["uuid"]
@@ -230,11 +237,9 @@ def run_backup(session, vm_exclude, network, host, dest):
 	# that are off, the dom0, and any that have been added to an exlusion list
 	# in the config file
 	for opaqueref, vm in all_vms.items():
-		for match in vm_exclude:
-			if match in vm['name_label'] or match in vm['uuid']:
-				log.debug("Excluding virtual machine %s" % vm['name_label'])
-			elif not vm['is_a_template'] and not vm['is_control_domain'] and vm['power_state'] == "Running":
-				backup_vms[opaqueref] = vm
+		if not vm['is_a_template'] and not vm['is_control_domain'] and vm['power_state'] == "Running":
+			log.debug("Adding VM %s to backup queue" % vm['name_label'])
+			backup_vms[opaqueref] = vm
 	log.debug("List of VMs assembled")
 	
 	# Now we can begin the main loop
@@ -247,11 +252,10 @@ def run_backup(session, vm_exclude, network, host, dest):
 		if not this_vm.pause():
 			log.warning("Skipping VM %s : could not pause" % this_vm.name)
 			continue
-	
-		# After having paused the VM, take a snapshot of its first disk. Note
-		# that this function can be overridden to snapshot all disks, but I
-		# can't really think we'd ever need this, so that is up for discussion
-		this_vdi_ref = this_vm.snapshot()
+		
+		log.debug("VM %s paused successfully" % this_vm.name)
+		# After having paused the VM, take a snapshot of its first disk.
+		this_vdi_ref = this_vm.snapshot_vdi()
 
 		# Check that the snapshot was successful. If not, report this, then
 		# attmept to unpause the VM
@@ -264,26 +268,42 @@ def run_backup(session, vm_exclude, network, host, dest):
 				log.critical("Unpausing also failed for VM %s, requires manual intervention" % this_vm.name)
 				continue
 			continue
+		
+		if not this_vm.unpause():
+			log.critical("Unpause operation failed for VM %s" % this_vm.name)
+
+		log.debug("Snapshot successful for VM %s" % this_vm.name)
+		log.debug("%s VM now unpaused" % this_vm.name)
 	
 		# Pull the record for the newly create VDI snapshot, and then create and
 		# instance of the helper class to allow us to faff with it
-		this_vdi_dict = session.xenapi.VDI.get_record(this_vdi_ref)
+		try:
+			this_vdi_dict = session.xenapi.VDI.get_record(this_vdi_ref)
+		except Exception, e:
+			log.error("Error retrieving VDI details for VDI %s" % this_vdi_ref)
+			log.error("Skipping this VDI")
+			continue
+
 		this_vdi = VDI(session, this_vdi_ref, this_vdi_dict)
 	
 		# Attempt to expose the snapshot using the http API, if this hasn't
 		# worked then skip to the next one
-		expose_ref = this_vdi.expose(host, network)
 
-		if not expose_ref:
+		if not this_vdi.expose():
 			log.warning("Failed to expose VDI for %s" % this_vm.name)
 			continue
+
+		log.debug("Snapshot exposed successfully")
 		
 		# Grab the full record for the exposed VDI and then extract the full url
 		# for this -  note that due to XenAPI's questionable overuse of UUIDs,
 		# we're having to loop to find it. Breaks if the VDI is not exposed.
-		this_record = get_record(session, expose_ref, host)
-		this_url = next(v for k,v in this_record.items() if 'url_full' in k)
-		
+		this_record = this_vdi.get_record(host)
+		if this_record:
+			this_url = next(v for k,v in this_record.items() if 'url_full' in k)
+		else:
+			log.error("Could not retrive url, skipping")
+			continue
 		# Construct the full path for the saved snapshot on the server. This
 		# could potentially do with some discussion, as the snapshot_time field
 		# is annoyingly formatted
@@ -293,7 +313,9 @@ def run_backup(session, vm_exclude, network, host, dest):
 		
 		# Attempt a download of the file - note that this handler needs a lot of
 		# work in terms of error handling as it is totally bare at the moment
-		download_file(this_url, full_path)
+		
+		## COMMENTED OUT FOR NOW JUST WANT TO TEST THE REST
+		#download_file(this_url, full_path)
 		
 		# If we can't unexpose then this could be an issue I suppose
 		if not this_vdi.unexpose():
@@ -321,20 +343,48 @@ def main():
 	# with load from config, error out if not
 	config = parse_config(CONFIG)
 	
+	# Get log level
+	numeric_level = getattr(logging, config['loglevel'].upper(), None)
+	
+	# Check log level is real
+	if not isinstance(numeric_level, int):
+		raise ValueError('Invalid log level: %s' % config['loglevel'])
+	
+	# Check log filepath
+	if not os.path.isdir(config['logdir']):
+		try:
+			os.makedirs(config['logdir'])
+		except:
+			raise ValueError('Invalid log path: %s' % config['logdir'])
+	
+	# Generate new log file (hour and mins included to allow multiple runs
+	timestamp = datetime.datetime.utcnow().strftime("%y-%m-%d_%H-%M")
+	logfile = config['logdir'] + '/' + timestamp + '.log'
+
+	formatter = logging.Formatter('%(asctime)s: %(levelname)s: %(message)s')
+	
+	# Set logging 
+	logging.basicConfig(filename=logfile, level=numeric_level)
+	
 	url = 'http://' + config['ip']
 	session = XenAPI.Session(url)
 	try:
 		session.login_with_password(config['user'], config['passwd'])
 	except Exception, e:
-		print "Login failed with supplied details: %s" % e
+		log.critical("Login failed with supplied details: %s" % e)
 		sys.exit(1)
+
+	log.debug("Login successful to host %s as user %s" % (config['ip'], config['user']))
 	# Assuming the first host in the set is the currently connected host.
 	# TODO: Does this work on XenServer pools??
 	host_ref = session.xenapi.host.get_all()[0]
+	log.debug("Retrieved Xen host reference %s" % host_ref)
 	# Grab the net uuid, again this is assuming the one that is on eth0
 	network = get_network_uuid(session)
+	log.debug("Retrieved Xen network reference %s" % network)
 	
 	# TODO - test that dirs exist
+	log.debug("Beginning main backup loop")
 	run_backup(session, False, network, host_ref, config['dldir'])
 
 if __name__ == '__main__':
