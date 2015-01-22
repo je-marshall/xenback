@@ -77,13 +77,12 @@ class VDI:
 		args = {'record_handle' : self.expose_ref}
 
 		try:
-			xml = session.xenapi.host.call_plugin(host, 'transfer', 'get_record', args)
+			xml = self.session.xenapi.host.call_plugin(host, 'transfer', 'get_record', args)
 		except Exception, e:
 			log.error("Failed to parse XML stream")
 			log.error(e)
 			return False
 		
-		print xml
 		record = {}
 		doc = minidom.parseString(xml)
 	
@@ -289,8 +288,11 @@ def run_backup(session, vm_exclude, network, host, dest):
 		# Attempt to expose the snapshot using the http API, if this hasn't
 		# worked then skip to the next one
 
-		if not this_vdi.expose():
+		if not this_vdi.expose(host, network):
 			log.warning("Failed to expose VDI for %s" % this_vm.name)
+			log.warning("Detroying snapshot %s" % this_vdi.uuid)
+			if not this_vdi.destroy():
+				log.error("Could not clean up by destroying VDI %s" % this_vdi.uuid)
 			continue
 
 		log.debug("Snapshot exposed successfully")
@@ -298,16 +300,20 @@ def run_backup(session, vm_exclude, network, host, dest):
 		# Grab the full record for the exposed VDI and then extract the full url
 		# for this -  note that due to XenAPI's questionable overuse of UUIDs,
 		# we're having to loop to find it. Breaks if the VDI is not exposed.
-		this_record = this_vdi.get_record(host)
+		this_record = this_vdi.get_expose_record(host)
 		if this_record:
 			this_url = next(v for k,v in this_record.items() if 'url_full' in k)
 		else:
 			log.error("Could not retrive url, skipping")
+			if not this_vdi.unexpose(host):
+				log.critical("Could not unexpose VDI %s" % this_vdi.uuid)
+			if not this_vdi.destroy():
+				log.critical("Could not destroy VDI %s" % this_vdi.uuid)
 			continue
 		# Construct the full path for the saved snapshot on the server. This
 		# could potentially do with some discussion, as the snapshot_time field
 		# is annoyingly formatted
-		full_path = dest + this_vm.name + str(test_record['snapshot_time'])
+		full_path = dest + this_vm.name + str(this_vdi.vdi_dict['snapshot_time'])
 
 		log.info("Downloading snapshot for VM %s to destination %s" % (this_vm.name, full_path))
 		
@@ -318,7 +324,7 @@ def run_backup(session, vm_exclude, network, host, dest):
 		#download_file(this_url, full_path)
 		
 		# If we can't unexpose then this could be an issue I suppose
-		if not this_vdi.unexpose():
+		if not this_vdi.unexpose(host):
 			log.critical("Unexpose failed for %s, manual intervention required")
 		
 		# Finally, destroy the vdi that has been created as it is no longer
