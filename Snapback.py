@@ -1,7 +1,8 @@
-#!/bin/env python2.7
+#!/usr/bin/python2.7
 
 import XenAPI
 import os
+import argparse
 import datetime
 import sys
 import logging
@@ -13,6 +14,9 @@ from xml.dom import minidom
 
 # Some default values
 CONFIG = "Snapback.cfg"
+DESCRIPTION = '''
+Need to work on this
+			  '''
 
 class VDI:
 	'''
@@ -170,16 +174,67 @@ def get_network_uuid(session):
 		if 'eth0' in network["name_label"]:
 			return network["uuid"]
 
-def download_file(url, filepath):
+def download_file(record, filepath):
+	# This has now got a bit more complicated as it needs to be able to parse
+	# the username and password for basic http auth out of the incoming record
+
+	# Check the file path exists, if not create it
+	# NOTE - the behaviour is default to overwrite
+
+	try:
+		if not os.path.isfile(filepath):
+			open(filepath, 'a').close()
+	except Exception, e:
+		log.error("Incorrect filepath %s" % filepath)
+		log.debug(e)
+		return False
+	
+	
+	# Construct a full url without the auth bits in it
+	full_url = record['transfer_mode'] + '://' + record['ip'] + ':' + record['port'] + record['url_path']
+	
+	# Instantiate the password manager
+	password_manager = urllib2.HTTPPasswordMgrWithDefaultRealm()
+	
+	# Add auth details
+	password_manager.add_password(None, full_url, record['username'], record['password'])
+	
+	# Specify handler
+	handler = urllib2.HTTPBasicAuthHandler(password_manager)
+	
+	# Specify opener
+	opener = urllib2.build_opener(handler)
+	
+	# Attempt to auth and download the file
+	try:
+		req = opener.open(full_url)
+		chunk_size = 16 * 1024
+		with open(filepath, 'wb') as fp:
+			while True:
+				chunk = req.read(chunk_size)
+				if not chunk: break
+				fp.write(chunk)
+	except urllib2.HTTPError as e:
+		log.error("The server could not fulfill the request")
+		log.debug(e)
+		return False
+	except urllib2.URLError as e:
+		log.error("Server unreachable")
+		log.debug(e)
+		return False
+	else:
+		return True
+
+
     # Downloads a file in chunks and logs datestamps before and after
-    req = urllib2.urlopen(url)
-    chunk_size = 16 * 1024
-    # insert logging timestamp
-    with open(filepath, 'wb') as fp:
-        while True:
-            chunk = req.read(chunk_size)
-            if not chunk: break
-            fp.write(chunk)
+    #req = urllib2.urlopen(url)
+    #chunk_size = 16 * 1024
+    ## insert logging timestamp
+    #with open(filepath, 'wb') as fp:
+    #    while True:
+    #        chunk = req.read(chunk_size)
+    #        if not chunk: break
+    #        fp.write(chunk)
 
 def parse_config(config_file):
 	# reads the config from a file and returns a formatted dictionary
@@ -217,15 +272,12 @@ def parse_config(config_file):
 
 # TODO - Add in task creation/management, so as to appease the XenAPI overlords
 
-def run_backup(session, vm_exclude, network, host, dest):
+def run_backup(session, network, dest, vm_exclude=[]):
 	'''
 		Runs the main backup loop, excluding any VM's that have been pulled from
 		the config file
 	'''
 	log = logging.getLogger(__name__)
-	if not vm_exclude:
-		log.debug('No VMs to exclude')
-		vm_exclude = []
 	# First we need to get a list of all the available VM's on the server, as
 	# well as all of the VBD's
 	all_vms = session.xenapi.VM.get_all_records()
@@ -237,7 +289,7 @@ def run_backup(session, vm_exclude, network, host, dest):
 	# in the config file
 	for opaqueref, vm in all_vms.items():
 		if not vm['is_a_template'] and not vm['is_control_domain'] and vm['power_state'] == "Running":
-			log.debug("Adding VM %s to backup queue" % vm['name_label'])
+			log.info("Adding VM %s to backup queue" % vm['name_label'])
 			backup_vms[opaqueref] = vm
 	log.debug("List of VMs assembled")
 	
@@ -271,9 +323,18 @@ def run_backup(session, vm_exclude, network, host, dest):
 		if not this_vm.unpause():
 			log.critical("Unpause operation failed for VM %s" % this_vm.name)
 
-		log.debug("Snapshot successful for VM %s" % this_vm.name)
+		log.info("Snapshot successful for VM %s" % this_vm.name)
 		log.debug("%s VM now unpaused" % this_vm.name)
-	
+		
+		# Check which host the vm is running on - not sure if this will help
+		log.debug("Checking which host to use to download")
+		if not this_vm.vm_dict['affinity']:
+			host = session.xenapi.host.get_all()[0]
+			log.debug("No host found, defaulting to pool master %s" % host)
+		else:
+			host = this_vm.vm_dict['affinity']
+			log.debug("Using host %s" % host)
+
 		# Pull the record for the newly create VDI snapshot, and then create and
 		# instance of the helper class to allow us to faff with it
 		try:
@@ -281,6 +342,7 @@ def run_backup(session, vm_exclude, network, host, dest):
 		except Exception, e:
 			log.error("Error retrieving VDI details for VDI %s" % this_vdi_ref)
 			log.error("Skipping this VDI")
+			log.debug(e)
 			continue
 
 		this_vdi = VDI(session, this_vdi_ref, this_vdi_dict)
@@ -290,7 +352,7 @@ def run_backup(session, vm_exclude, network, host, dest):
 
 		if not this_vdi.expose(host, network):
 			log.warning("Failed to expose VDI for %s" % this_vm.name)
-			log.warning("Detroying snapshot %s" % this_vdi.uuid)
+			log.warning("Detroying snapshot %s and skipping" % this_vdi.uuid)
 			if not this_vdi.destroy():
 				log.error("Could not clean up by destroying VDI %s" % this_vdi.uuid)
 			continue
@@ -310,29 +372,36 @@ def run_backup(session, vm_exclude, network, host, dest):
 			if not this_vdi.destroy():
 				log.critical("Could not destroy VDI %s" % this_vdi.uuid)
 			continue
-		# Construct the full path for the saved snapshot on the server. This
-		# could potentially do with some discussion, as the snapshot_time field
-		# is annoyingly formatted
-		full_path = dest + this_vm.name + str(this_vdi.vdi_dict['snapshot_time'])
+
+		# Construct the full path for the saved snapshot on the server.
+		full_path = dest + this_vm.name + '.xva'
 
 		log.info("Downloading snapshot for VM %s to destination %s" % (this_vm.name, full_path))
+		log.debug("URL: %s" % this_url)
 		
 		# Attempt a download of the file - note that this handler needs a lot of
 		# work in terms of error handling as it is totally bare at the moment
 		
 		## COMMENTED OUT FOR NOW JUST WANT TO TEST THE REST
-		#download_file(this_url, full_path)
+		download_file(this_record, full_path)
 		
+		log.info("Download successful for VM %s" % this_vm.name)
 		# If we can't unexpose then this could be an issue I suppose
+
+		log.debug("Attempting to unexpose snapshot")
 		if not this_vdi.unexpose(host):
 			log.critical("Unexpose failed for %s, manual intervention required")
+
+		log.debug("Snapshot unexposed")
 		
 		# Finally, destroy the vdi that has been created as it is no longer
 		# useful. Note that this would probably not be the case if the snapshot
 		# were to be used as the basis of a differential, this will need more
 		# thought.
+		log.debug("Destroying snapshot")
 		if not this_vdi.destroy():
 			log.critical("Could not destroy snapshot for %s" % this_vm.name)
+		log.debug("Snapshot destroyed")
 			
 
 
@@ -343,11 +412,16 @@ def main():
 	
 	log = logging.getLogger(__name__)
 
-	# Need to have a bit here so as to be able to override config from the
-	# command line and also to be able to set things like weekly vs daily from
-	# the command line. Could potentially edit that but for now lets just got
-	# with load from config, error out if not
-	config = parse_config(CONFIG)
+	parser = argparse.ArgumentParser(description=DESCRIPTION)
+
+	parser.add_argument('-c', '--conf', help='''Specify config file''')
+	parser.add_argument('-v', '--verbose', action='store_true')
+	args = parser.parse_args()
+	
+	if args.conf:
+		config = parse_config(args.conf)
+	else:
+		config = parse_config(CONFIG)
 	
 	# Get log level
 	numeric_level = getattr(logging, config['loglevel'].upper(), None)
@@ -364,13 +438,22 @@ def main():
 			raise ValueError('Invalid log path: %s' % config['logdir'])
 	
 	# Generate new log file (hour and mins included to allow multiple runs
-	timestamp = datetime.datetime.utcnow().strftime("%y-%m-%d_%H-%M")
+	timestamp = datetime.datetime.utcnow().strftime("%d-%m-%y_%H-%M")
 	logfile = config['logdir'] + '/' + timestamp + '.log'
 
 	formatter = logging.Formatter('%(asctime)s: %(levelname)s: %(message)s')
-	
+	fhandler = logging.FileHandler(logfile)
+	shandler = logging.StreamHandler()
+
+	fhandler.setFormatter(formatter)
 	# Set logging 
-	logging.basicConfig(filename=logfile, level=numeric_level)
+	#logging.basicConfig(filename=logfile, level=numeric_level)
+	log.setLevel(numeric_level)
+	log.addHandler(fhandler)
+	
+	if args.verbose:
+		log.addHandler(shandler)
+		shandler.setFormatter(formatter)
 	
 	url = 'http://' + config['ip']
 	session = XenAPI.Session(url)
@@ -381,17 +464,13 @@ def main():
 		sys.exit(1)
 
 	log.debug("Login successful to host %s as user %s" % (config['ip'], config['user']))
-	# Assuming the first host in the set is the currently connected host.
-	# TODO: Does this work on XenServer pools??
-	host_ref = session.xenapi.host.get_all()[0]
-	log.debug("Retrieved Xen host reference %s" % host_ref)
 	# Grab the net uuid, again this is assuming the one that is on eth0
 	network = get_network_uuid(session)
 	log.debug("Retrieved Xen network reference %s" % network)
 	
 	# TODO - test that dirs exist
 	log.debug("Beginning main backup loop")
-	run_backup(session, False, network, host_ref, config['dldir'])
+	run_backup(session, network, config['dldir'])
 
 if __name__ == '__main__':
 	main()
