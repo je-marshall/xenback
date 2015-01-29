@@ -180,6 +180,7 @@ def download_file(record, filepath):
 
 	# Check the file path exists, if not create it
 	# NOTE - the behaviour is default to overwrite
+	log = logging.getLogger(__name__)
 
 	try:
 		if not os.path.isfile(filepath):
@@ -207,6 +208,7 @@ def download_file(record, filepath):
 	
 	# Attempt to auth and download the file
 	try:
+		log.debug("Download begun from %s to %s" % (full_url, filepath))
 		req = opener.open(full_url)
 		chunk_size = 16 * 1024
 		with open(filepath, 'wb') as fp:
@@ -224,17 +226,6 @@ def download_file(record, filepath):
 		return False
 	else:
 		return True
-
-
-    # Downloads a file in chunks and logs datestamps before and after
-    #req = urllib2.urlopen(url)
-    #chunk_size = 16 * 1024
-    ## insert logging timestamp
-    #with open(filepath, 'wb') as fp:
-    #    while True:
-    #        chunk = req.read(chunk_size)
-    #        if not chunk: break
-    #        fp.write(chunk)
 
 def parse_config(config_file):
 	# reads the config from a file and returns a formatted dictionary
@@ -269,6 +260,14 @@ def parse_config(config_file):
 				   }
 
 	return return_dict
+
+def pre_command(command):
+	# Runs the command specified in the config file
+	pass
+
+def post_command(command):
+	# Runs the command specified in the config file
+	pass
 
 # TODO - Add in task creation/management, so as to appease the XenAPI overlords
 
@@ -468,7 +467,8 @@ def main():
 	network = get_network_uuid(session)
 	log.debug("Retrieved Xen network reference %s" % network)
 	
-	# TODO - test that dirs exist
+	log.debug("Attempting to run pre-command")
+	pre_command()
 	log.debug("Beginning main backup loop")
 	run_backup(session, network, config['dldir'])
 
