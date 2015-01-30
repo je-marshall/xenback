@@ -2,6 +2,7 @@
 
 import XenAPI
 import os
+import signal
 import argparse
 import datetime
 import sys
@@ -17,6 +18,53 @@ CONFIG = "Snapback.cfg"
 DESCRIPTION = '''
 Need to work on this
 			  '''
+
+def signal_term_handler(signal, frame, session):
+	# Handles any SIGTERMs
+	
+	log = logging.getLogger(__name__)
+	log.error("Caught SIGTERM, bailing")
+	log.error("VDI's may be exposed and VM's paused, needs manual intervention")
+	session.logout()
+	sys.exit(1)
+
+def signal_int_handler(signal, frame, session):
+	# Handles and SIGINTs
+	
+	log = logging.getLogger(__name__)
+	log.error("Caught SIGINT, attempting to shut down gracefully")
+
+	all_vms = session.xenapi.VM.get_all_records()
+	all_vdis = session.xenapi.VDI.get_all_records()
+
+	for opaqueref, vm in all_vms.items():
+		if vm['power_state'] == 'Paused':
+			this_vm = VM(session, opaqueref, vm)
+			log.info("CLEANUP - Unpausing VM %s" % this_vm.name)
+			if not this_vm.unpause():
+				log.error("CLEANUP - could not unpause VM %s" % this_vm.name)
+			log.info("CLEANUP - Unpaused VM %s successfully" % this_vm.name)
+	
+	for opaqueref, vdi in all_vdis.items():
+		if vdi['is_snapshot']:
+			this_vdi = VDI(session, opaqueref, vdi)
+	        if not this_vm.vm_dict['affinity']:
+	            host = session.xenapi.host.get_all()[0]
+	            log.debug("No host found, defaulting to pool master %s" % host)
+	        else:
+	            host = this_vm.vm_dict['affinity']
+	            log.debug("Using host %s" % host)
+			if not this_vdi.get_record(host):
+				continue
+			else:
+				log.debug("Attempting to unexpose VDI %s" % this_vdi.uuid)
+				if this_vdi.unexpose(host):
+					this_vdi.destroy()
+					log.info("CLEANUP - destroyed VDI %s" % this_vdi.uuid)
+
+	log.error("Cleanup successful, still needs checking manually")
+	sys.exit(1)
+
 
 class VDI:
 	'''
@@ -73,22 +121,23 @@ class VDI:
 	def get_expose_record(self, host):
 		# Returns the record data associated with an exposed VDI
 		log = logging.getLogger(__name__)
-
-		if not self.is_exposed:
-			log.error("Tried to get a record for a non-exposed VDI: %s" % self.uuid)
-			return False
 	
 		args = {'record_handle' : self.expose_ref}
 
 		try:
 			xml = self.session.xenapi.host.call_plugin(host, 'transfer', 'get_record', args)
 		except Exception, e:
-			log.error("Failed to parse XML stream")
+			log.error("Failed to retrieve record")
 			log.error(e)
 			return False
 		
 		record = {}
-		doc = minidom.parseString(xml)
+		try:
+			doc = minidom.parseString(xml)
+		except Exception, e:
+			log.error("Failed to parse XML stream")
+			log.error(e)
+			return False
 	
 		try:
 			el = doc.getElementsByTagName('transfer_record')[0]
@@ -466,6 +515,9 @@ def main():
 	# Grab the net uuid, again this is assuming the one that is on eth0
 	network = get_network_uuid(session)
 	log.debug("Retrieved Xen network reference %s" % network)
+
+	signal.signal(signal.SIGTERM, signal_term_handler(session))
+	signal.signal(signal.SIGINT, signal_term_handler(session))
 	
 	log.debug("Attempting to run pre-command")
 	pre_command()
