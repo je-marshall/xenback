@@ -38,22 +38,20 @@ DESCRIPTION = '''
 Need to work on this
 			  '''
 
-def signal_term_handler(signal, frame, session):
+def signal_term_handler(signal, frame):
 	# Handles any SIGTERMs
 	
 	log = logging.getLogger(__name__)
 	log.error("Caught SIGTERM, bailing")
 	log.error("VDIs may be exposed and VMs paused, needs manual intervention")
-	session.logout()
 	sys.exit(1)
 
-def signal_int_handler(signal, frame, session):
+def signal_int_handler(signal, frame):
 	# Handles and SIGINTs
 	
 	log = logging.getLogger(__name__)
 	log.error("Caught SIGINT, bailing")
 	log.error("VDIs may be exposed and VMs paused, needs manual intervention")
-	session.logout()
 	sys.exit(1)
 
 
@@ -311,7 +309,7 @@ def post_command(command):
 
 # TODO - Add in task creation/management, so as to appease the XenAPI overlords
 
-def run_backup(session, network, dest, vm_exclude=[]):
+def run_backup(session, network, dest, dryrun, vm_exclude=[]):
 	'''
 		Runs the main backup loop, excluding any VM's that have been pulled from
 		the config file
@@ -421,10 +419,12 @@ def run_backup(session, network, dest, vm_exclude=[]):
 		# Attempt a download of the file - note that this handler needs a lot of
 		# work in terms of error handling as it is totally bare at the moment
 		
-		## COMMENTED OUT FOR NOW JUST WANT TO TEST THE REST
-		download_file(this_record, full_path)
+		if not dryrun:
+			download_file(this_record, full_path)
+			log.info("Download successful for VM %s" % this_vm.name)
+		else:
+			log.info("Dry run set, not downloading file")
 		
-		log.info("Download successful for VM %s" % this_vm.name)
 		# If we can't unexpose then this could be an issue I suppose
 
 		log.debug("Attempting to unexpose snapshot")
@@ -455,6 +455,7 @@ def main():
 
 	parser.add_argument('-c', '--conf', help='''Specify config file''')
 	parser.add_argument('-v', '--verbose', action='store_true')
+	parser.add_argument('-n', '--dryrun', action='store_true')
 	args = parser.parse_args()
 	
 	if args.conf:
@@ -507,13 +508,13 @@ def main():
 	network = get_network_uuid(session)
 	log.debug("Retrieved Xen network reference %s" % network)
 
-	signal.signal(signal.SIGTERM, signal_term_handler(session))
-	signal.signal(signal.SIGINT, signal_term_handler(session))
+	signal.signal(signal.SIGTERM, signal_term_handler)
+	signal.signal(signal.SIGINT, signal_term_handler)
 	
 	log.debug("Attempting to run pre-command")
-	pre_command()
+	#pre_command()
 	log.debug("Beginning main backup loop")
-	run_backup(session, network, config['dldir'])
+	run_backup(session, network, config['dldir'], args.dryrun)
 
 if __name__ == '__main__':
 	main()
