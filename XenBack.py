@@ -1,20 +1,39 @@
 #!/usr/bin/python2.7
 
-import XenAPI
+# XenBack
+# Written by Jon Marshall 31/01/2015
+# A simple utility for backing up only OS partitions of virtual machines running
+# on a Citrix Xenserver virtual host. Has made extensive use of code snippets
+# from all over the place. Probably obviously flawed.
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+# 
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+from xml.dom import minidom
+import argparse
+import ConfigParser
+import datetime
+import logging
 import os
 import signal
-import argparse
-import datetime
 import sys
-import logging
 import time
 import urllib2
-import ConfigParser
-from xml.dom import minidom
+import XenAPI
 
 
 # Some default values
-CONFIG = "Snapback.cfg"
+CONFIG = "XenBack.cfg"
 DESCRIPTION = '''
 Need to work on this
 			  '''
@@ -24,7 +43,7 @@ def signal_term_handler(signal, frame, session):
 	
 	log = logging.getLogger(__name__)
 	log.error("Caught SIGTERM, bailing")
-	log.error("VDI's may be exposed and VM's paused, needs manual intervention")
+	log.error("VDIs may be exposed and VMs paused, needs manual intervention")
 	session.logout()
 	sys.exit(1)
 
@@ -32,37 +51,9 @@ def signal_int_handler(signal, frame, session):
 	# Handles and SIGINTs
 	
 	log = logging.getLogger(__name__)
-	log.error("Caught SIGINT, attempting to shut down gracefully")
-
-	all_vms = session.xenapi.VM.get_all_records()
-	all_vdis = session.xenapi.VDI.get_all_records()
-
-	for opaqueref, vm in all_vms.items():
-		if vm['power_state'] == 'Paused':
-			this_vm = VM(session, opaqueref, vm)
-			log.info("CLEANUP - Unpausing VM %s" % this_vm.name)
-			if not this_vm.unpause():
-				log.error("CLEANUP - could not unpause VM %s" % this_vm.name)
-			log.info("CLEANUP - Unpaused VM %s successfully" % this_vm.name)
-	
-	for opaqueref, vdi in all_vdis.items():
-		if vdi['is_snapshot']:
-			this_vdi = VDI(session, opaqueref, vdi)
-	        if not this_vm.vm_dict['affinity']:
-	            host = session.xenapi.host.get_all()[0]
-	            log.debug("No host found, defaulting to pool master %s" % host)
-	        else:
-	            host = this_vm.vm_dict['affinity']
-	            log.debug("Using host %s" % host)
-			if not this_vdi.get_record(host):
-				continue
-			else:
-				log.debug("Attempting to unexpose VDI %s" % this_vdi.uuid)
-				if this_vdi.unexpose(host):
-					this_vdi.destroy()
-					log.info("CLEANUP - destroyed VDI %s" % this_vdi.uuid)
-
-	log.error("Cleanup successful, still needs checking manually")
+	log.error("Caught SIGINT, bailing")
+	log.error("VDIs may be exposed and VMs paused, needs manual intervention")
+	session.logout()
 	sys.exit(1)
 
 
