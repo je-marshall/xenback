@@ -277,6 +277,7 @@ def parse_config(config_file):
 		sys.exit(1)
 	
 	try:
+		# Mandatory features
 		host_ip = config.get('Host', 'ip')
 		user = config.get('Host', 'user')
 		passwd = config.get('Host', 'pass')
@@ -289,12 +290,19 @@ def parse_config(config_file):
 		print "Config file incorrectly formatted: %s" % e
 		sys.exit(1)
 
+	try:
+		# Optional features
+		exclude = config.get('VMs', 'exclude').split()
+	except NoSectionError:
+		exclude = []
+
 	return_dict = { 'ip' : host_ip,
 				    'user' : user,
 					'passwd' : passwd,
 					'dldir' : dldir,
 					'logdir' : logdir,
-					'loglevel' : loglevel
+					'loglevel' : loglevel,
+					'exclude' : exclude
 				   }
 
 	return return_dict
@@ -326,8 +334,18 @@ def run_backup(session, network, dest, dryrun, vm_exclude=[]):
 	# in the config file
 	for opaqueref, vm in all_vms.items():
 		if not vm['is_a_template'] and not vm['is_control_domain'] and vm['power_state'] == "Running":
-			log.info("Adding VM %s to backup queue" % vm['name_label'])
-			backup_vms[opaqueref] = vm
+			if vm['name_label'] in vm_exclude:
+				log.info("Excluding VM %s, %s" % (vm['name_label'], vm['uuid']))
+			elif vm['uuid'] in vm_exclude:
+				log.info("Excluding VM %s, %s" % (vm['name_label'], vm['uuid']))
+			else:
+				log.info("Adding VM %s to backup queue" % vm['name_label'])
+				backup_vms[opaqueref] = vm
+	
+	if not backup_vms:
+		log.info("No VM's to backup, exiting")
+		sys.exit(0)
+	
 	log.debug("List of VMs assembled")
 	
 	# Now we can begin the main loop
@@ -514,7 +532,7 @@ def main():
 	log.debug("Attempting to run pre-command")
 	#pre_command()
 	log.debug("Beginning main backup loop")
-	run_backup(session, network, config['dldir'], args.dryrun)
+	run_backup(session, network, config['dldir'], args.dryrun, vm_exclude=config['exclude'])
 
 if __name__ == '__main__':
 	main()
