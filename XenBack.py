@@ -205,13 +205,6 @@ class VM:
 					self.log.error(e)
 					return False
 
-
-def get_network_uuid(session):
-	# For now this is dumb and picks the one on eth0
-	for ref, network in session.xenapi.network.get_all_records().items():
-		if 'eth0' in network["name_label"]:
-			return network["uuid"]
-
 def download_file(record, filepath):
 	# This has now got a bit more complicated as it needs to be able to parse
 	# the username and password for basic http auth out of the incoming record
@@ -293,7 +286,7 @@ def parse_config(config_file):
 	try:
 		# Optional features
 		exclude = config.get('VMs', 'exclude').split()
-	except NoSectionError:
+	except ConfigParser.NoSectionError:
 		exclude = []
 
 	return_dict = { 'ip' : host_ip,
@@ -522,8 +515,12 @@ def main():
 		sys.exit(1)
 
 	log.debug("Login successful to host %s as user %s" % (config['ip'], config['user']))
-	# Grab the net uuid, again this is assuming the one that is on eth0
-	network = get_network_uuid(session)
+
+	# Grab the net uuid
+	for ref, net in session.xenapi.network.get_all_records().items():
+		if config['network_interface'] in net["name_label"]:
+			network = net["uuid"]
+
 	log.debug("Retrieved Xen network reference %s" % network)
 
 	signal.signal(signal.SIGTERM, signal_term_handler)
