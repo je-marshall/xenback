@@ -24,12 +24,14 @@ import argparse
 import ConfigParser
 import datetime
 import logging
+import re
 import os
 import signal
 import sys
 import time
 import urllib2
 import XenAPI
+import subprocess
 
 
 # Some default values
@@ -205,7 +207,174 @@ class VM:
 					self.log.error(e)
 					return False
 
-def download_file(record, filepath):
+def run_command(args):
+	# Simple wrapper for exception handling etc
+
+	log = logging.getLogger(__name__)
+
+	if type(args) is not list:
+		log.error("Cannot run command with args supplied:")
+		log.error(args)
+
+	try:
+		return_val = subprocess.check_output(args)
+	except subprocess.CalledProcessError, e:
+		log.error("Command failed: %s" % e)
+		return False
+
+	return return_val
+
+def newly_added_disk(before, after):
+	# Returns the path of a newly added disk - this is pretty fucking hacky and
+	# I really don't like it but I can't think of anything better
+
+	log = logging.getLogger(__name__)
+
+	before_list = before.split('\n')
+	after_list = after.split('\n')
+
+	change = [s for s in after_list if s not in before_list]
+
+	final_list = []
+
+	for drive in change:
+		m = re.search(r'\d+$', drive)
+		if m is None:
+			final_list.append(drive)
+
+	if len(final_list) == 1:
+		return "/dev/%s" % final_list[0]
+	else:
+		log.error("More than one drive detected, cannot figure out which one to use")
+		return False
+
+
+def download_file_iscsi(record, filepath, img_format='vpc'):
+	# Uses open-iscsi and qemu-img to create a vhd/qcow2 file of the hard drive
+	# that is exposed over iscsi
+	
+	log = logging.getLogger(__name__)
+
+	# Check the file path exists, if not create it
+	# NOTE - the default behaviour is to overwrite
+	try:
+		if not os.path.isfile(filepath):
+			open(filepath, 'a').close()
+	except Exception, e:
+		log.error("Incorrect filepath %s" % filepath)
+		log.debug(e)
+		return False
+
+	# Begin the iSCSI stuff:
+
+	# Check what drives are present before starting to add the iSCSI target
+
+	disk_cmd = ['lsblk', '-r', '-n', '-o', 'NAME']
+	before_rtn = run_command(disk_cmd)
+
+	if not before_rtn:
+		log.error("Failed to enumerate disks before adding iSCSI target")
+		return False
+
+	# Discover the iSCSI target 
+	disc_cmd = ['iscsiadm', '-m', 'discovery', '-t', 'st', '-p', record['ip']]
+	disc_rtn = run_command(disc_cmd)
+
+	if disc_rtn not in record['iscsi_iqn']:
+		log.error("Something has gone wrong - %s does not match record value %s" % (disc_rtn, record['iscsi_iqn']))
+		return False
+	
+	# Format the portal address, then set up auth parameters
+	portal = '%s:%s' % (record['ip'], record['port'])
+
+	addauth_cmd = ['iscsiadm', '-m', 'node', '--targetname', record['iscsi_iqn'], '--portal', portal,
+				  '--op=update', '--name', 'node.session.auth.authmethod', '--value=CHAP']
+
+	addauth_rtn = run_command(addauth_cmd)
+
+	if not addauth_rtn:
+		log.error("Could not change auth method on node %s" % record['iscsi_iqn'])
+		return False
+
+	adduser_cmd = ['iscsiadm', '-m', 'node', '--targetname', record['iscsi_iqn'], '--portal', portal,
+				  '--op=update', '--name', 'node.session.auth.username', '--value=%s' % record['username']]
+
+	if not adduser_rtn:
+		log.error("Could not add username on node %s" % record['iscsi_iqn'])
+		return False
+
+	addpass_cmd = ['iscsiadm', '-m', 'node', '--targetname', record['iscsi_iqn'], '--portal', portal,
+				  '--op=update', '--name', 'node.session.auth.password', '--value=%s' % record['password']]
+
+	if not addpass_rtn:
+		log.error("Could not add password on node %s" % record['iscsi_iqn'])
+		return False
+
+	# Now that all the details have been set up properly, it is time to
+	# initiate the connection to the iSCSI target
+
+	connect_cmd = ['iscsiadm', '-m', 'node', '--targetname', record['iscsi_iqn'], '--portal', portal,
+				  '--login']
+	
+	connect_rtn = run_comand(connect_cmd)
+
+	if not connect_rtn:
+		log.error("Failed to connect to iSCSI target")
+		return False
+	
+	# Check what drives are present after 
+	
+	after_rtn = run_command(disk_cmd)
+
+	if not after_rtn:
+		log.error("Failed to enumerate disks after adding iSCSI target")
+		return False
+
+	# Attempt to identify the target disk
+	target_disk = newly_added_disk(before, after)
+
+	if not target_disk:
+		log.error("Failed to identify iSCIS disk")
+		return False
+
+	# Time to make an image out of it!
+	create_image_cmd = ['qemu-img', 'convert', '-O', img_format, target_disk, filepath]
+
+	create_image_rtn = run_command(create_image_cmd)
+
+	if not create_image_rtn:
+		log.error("Failed to create image %s" % filepath)
+		return False
+
+	# If image creation has been successful, logout of the iSCSI target
+
+	logout_cmd = ['iscsiadm', '-m', 'node', '--targetname', record['iscsi_iqn'], '--portal', portal,
+				 '--logout']
+	
+	logout_rtn = run_command(logout_cmd)
+
+	if not logout_rtn:
+		log.error("Failed to log out of iSCSI target")
+		return False
+	
+	# Once logged out, delete the record associated with the iSCSI target, to
+	# avoid clogging it up
+
+	delete_cmd = ['iscsiadm', '-m', 'node', '-o', 'delete', '--targetname', record['iscsi_iqn'], 
+				 '--portal', portal]
+	
+	delete_rtn = run_command(delete_cmd)
+
+	if not delete_rtn:
+		log.error("Could not delete iSCSI target")
+		return False
+
+	# Everything went smoothly! 
+
+	return True
+	
+
+def download_file_http(record, filepath):
 	# This has now got a bit more complicated as it needs to be able to parse
 	# the username and password for basic http auth out of the incoming record
 
@@ -275,6 +444,8 @@ def parse_config(config_file):
 		user = config.get('Host', 'user')
 		passwd = config.get('Host', 'pass')
 
+		transfermode = config.get('Local', 'transfermode')
+
 		dldir = config.get('Local', 'dldir')
 		logdir = config.get('Local', 'logdir')
 		loglevel = config.get('Local', 'loglevel')
@@ -292,6 +463,7 @@ def parse_config(config_file):
 	return_dict = { 'ip' : host_ip,
 				    'user' : user,
 					'passwd' : passwd,
+					'transfermode' : transfermode,
 					'dldir' : dldir,
 					'logdir' : logdir,
 					'loglevel' : loglevel,
@@ -431,11 +603,17 @@ def run_backup(session, network, dest, dryrun, vm_exclude=[]):
 		# work in terms of error handling as it is totally bare at the moment
 		
 		if not dryrun:
-			download_file(this_record, full_path)
-			log.info("Download successful for VM %s" % this_vm.name)
+			if transfermode == 'iscsi':
+				dlsuccess = download_file_iscsi(record, full_path)
+			elif transfermode == 'http':
+				download_file_http(this_record, full_path)
 		else:
 			log.info("Dry run set, not downloading file")
-		
+	
+		if dlsuccess:
+			log.info("Download successful for VM %s" % this_vm.name)
+		else:
+			log.error("Download unsuccessful for VM %s" % this_vm.name)
 		# If we can't unexpose then this could be an issue I suppose
 
 		log.debug("Attempting to unexpose snapshot")
@@ -505,6 +683,24 @@ def main():
 	if args.verbose:
 		log.addHandler(shandler)
 		shandler.setFormatter(formatter)
+	
+	# Need to check relevant utilities installed
+	if config['transfermode'] == 'iscsi':
+		log.info("iSCSI transfer selected, checking for relevant utilities")
+		qemu_cmd = ['which', 'qemu-img']
+		iscsiadm_cmd = ['which', 'iscsiadm']
+
+		qemu_rtn = run_command(qemu_cmd)
+		iscsiadm_cmd = run_command(iscsiadm_cmd)
+
+		if not qemu_rtn:
+			log.error("qemu-img not installed, aborting")
+			sys.exit(1)
+		elif not iscsiadm_cmd:
+			log.error("iscsiadm not installed, aborting")
+			sys.exit(1)
+
+		log.info("All programs available, continuing")
 	
 	url = 'http://' + config['ip']
 	session = XenAPI.Session(url)
