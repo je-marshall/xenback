@@ -72,9 +72,9 @@ class VDI:
 		self.exposed_ref = False
 		self.log = logging.getLogger(__name__)
 
-	def expose(self, host, network):
+	def expose(self, host, network, transfermode):
 		# Exposes this vdi as a vhd
-		args = { 'transfer_mode' : 'http',
+		args = { 'transfer_mode' : transfermode,
 				 'vdi_uuid' : self.uuid,
 				 'network_uuid' : network,
 				 'expose_vhd' : 'true',
@@ -218,9 +218,13 @@ def run_command(args):
 
 	try:
 		return_val = subprocess.check_output(args)
-	except subprocess.CalledProcessError, e:
+	except Exception, e:
 		log.error("Command failed: %s" % e)
 		return False
+	
+	if return_val == '':
+		# Command completed successfully with no stdout
+		return True
 
 	return return_val
 
@@ -280,9 +284,12 @@ def download_file_iscsi(record, filepath, img_format='vpc'):
 	disc_cmd = ['iscsiadm', '-m', 'discovery', '-t', 'st', '-p', record['ip']]
 	disc_rtn = run_command(disc_cmd)
 
-	if disc_rtn not in record['iscsi_iqn']:
-		log.error("Something has gone wrong - %s does not match record value %s" % (disc_rtn, record['iscsi_iqn']))
+	if not disc_rtn:
+		log.error("Could not find iSCSI target %s" % record['iscsi_iqn'])
 		return False
+
+	log.debug("iSCSI target discovered")
+	log.debug(disc_rtn)
 	
 	# Format the portal address, then set up auth parameters
 	portal = '%s:%s' % (record['ip'], record['port'])
@@ -296,8 +303,11 @@ def download_file_iscsi(record, filepath, img_format='vpc'):
 		log.error("Could not change auth method on node %s" % record['iscsi_iqn'])
 		return False
 
+
 	adduser_cmd = ['iscsiadm', '-m', 'node', '--targetname', record['iscsi_iqn'], '--portal', portal,
 				  '--op=update', '--name', 'node.session.auth.username', '--value=%s' % record['username']]
+
+	adduser_rtn = run_command(adduser_cmd)
 
 	if not adduser_rtn:
 		log.error("Could not add username on node %s" % record['iscsi_iqn'])
@@ -305,6 +315,8 @@ def download_file_iscsi(record, filepath, img_format='vpc'):
 
 	addpass_cmd = ['iscsiadm', '-m', 'node', '--targetname', record['iscsi_iqn'], '--portal', portal,
 				  '--op=update', '--name', 'node.session.auth.password', '--value=%s' % record['password']]
+
+	addpass_rtn = run_command(addpass_cmd)
 
 	if not addpass_rtn:
 		log.error("Could not add password on node %s" % record['iscsi_iqn'])
@@ -316,7 +328,7 @@ def download_file_iscsi(record, filepath, img_format='vpc'):
 	connect_cmd = ['iscsiadm', '-m', 'node', '--targetname', record['iscsi_iqn'], '--portal', portal,
 				  '--login']
 	
-	connect_rtn = run_comand(connect_cmd)
+	connect_rtn = run_command(connect_cmd)
 
 	if not connect_rtn:
 		log.error("Failed to connect to iSCSI target")
@@ -331,12 +343,13 @@ def download_file_iscsi(record, filepath, img_format='vpc'):
 		return False
 
 	# Attempt to identify the target disk
-	target_disk = newly_added_disk(before, after)
+	target_disk = newly_added_disk(before_rtn, after_rtn)
 
 	if not target_disk:
 		log.error("Failed to identify iSCIS disk")
 		return False
 
+	log.debug(target_disk)
 	# Time to make an image out of it!
 	create_image_cmd = ['qemu-img', 'convert', '-O', img_format, target_disk, filepath]
 
@@ -443,6 +456,7 @@ def parse_config(config_file):
 		host_ip = config.get('Host', 'ip')
 		user = config.get('Host', 'user')
 		passwd = config.get('Host', 'pass')
+		network_interface = config.get('Host', 'network')
 
 		transfermode = config.get('Local', 'transfermode')
 
@@ -463,6 +477,7 @@ def parse_config(config_file):
 	return_dict = { 'ip' : host_ip,
 				    'user' : user,
 					'passwd' : passwd,
+					'network_interface' : network_interface,
 					'transfermode' : transfermode,
 					'dldir' : dldir,
 					'logdir' : logdir,
@@ -482,7 +497,7 @@ def post_command(command):
 
 # TODO - Add in task creation/management, so as to appease the XenAPI overlords
 
-def run_backup(session, network, dest, dryrun, vm_exclude=[]):
+def run_backup(session, network, dest, dryrun, transfermode, vm_exclude=[]):
 	'''
 		Runs the main backup loop, excluding any VM's that have been pulled from
 		the config file
@@ -570,7 +585,7 @@ def run_backup(session, network, dest, dryrun, vm_exclude=[]):
 		# Attempt to expose the snapshot using the http API, if this hasn't
 		# worked then skip to the next one
 
-		if not this_vdi.expose(host, network):
+		if not this_vdi.expose(host, network, transfermode):
 			log.warning("Failed to expose VDI for %s" % this_vm.name)
 			log.warning("Detroying snapshot %s and skipping" % this_vdi.uuid)
 			if not this_vdi.destroy():
@@ -578,33 +593,29 @@ def run_backup(session, network, dest, dryrun, vm_exclude=[]):
 			continue
 
 		log.debug("Snapshot exposed successfully")
-		
-		# Grab the full record for the exposed VDI and then extract the full url
-		# for this -  note that due to XenAPI's questionable overuse of UUIDs,
-		# we're having to loop to find it. Breaks if the VDI is not exposed.
-		this_record = this_vdi.get_expose_record(host)
-		if this_record:
-			this_url = next(v for k,v in this_record.items() if 'url_full' in k)
-		else:
-			log.error("Could not retrive url, skipping")
-			if not this_vdi.unexpose(host):
-				log.critical("Could not unexpose VDI %s" % this_vdi.uuid)
-			if not this_vdi.destroy():
-				log.critical("Could not destroy VDI %s" % this_vdi.uuid)
-			continue
 
 		# Construct the full path for the saved snapshot on the server.
-		full_path = dest + this_vm.name + '.xva'
+		full_path = dest + this_vm.name + '.vhd'
+
+		this_record = this_vdi.get_expose_record(host)
+
+		if not this_record:
+			log.error("Failed to retrieve record for VM %s" % this_vm.name)
+			if not this_vdi.unexpose():
+				log.error("Failed to unexpose VDI for VM %s" % this_vm.name)
+				if not this_vdi.destroy():
+					log.error("Failed to destroy VDI for VM %s" % this_vm.name)
+				else:
+					log.error("Destroyed VDI for %s, but failed to download it" % this_vm.name)
 
 		log.info("Downloading snapshot for VM %s to destination %s" % (this_vm.name, full_path))
-		log.debug("URL: %s" % this_url)
 		
 		# Attempt a download of the file - note that this handler needs a lot of
 		# work in terms of error handling as it is totally bare at the moment
 		
 		if not dryrun:
 			if transfermode == 'iscsi':
-				dlsuccess = download_file_iscsi(record, full_path)
+				dlsuccess = download_file_iscsi(this_record, full_path)
 			elif transfermode == 'http':
 				download_file_http(this_record, full_path)
 		else:
@@ -712,10 +723,15 @@ def main():
 
 	log.debug("Login successful to host %s as user %s" % (config['ip'], config['user']))
 
+	network = False
 	# Grab the net uuid
 	for ref, net in session.xenapi.network.get_all_records().items():
-		if config['network_interface'] in net["name_label"]:
+		if config['network_interface'] in net["bridge"]:
 			network = net["uuid"]
+	
+	if not network:
+		log.error("Network not found %s" % config['network_interface'])
+		sys.exit(1)
 
 	log.debug("Retrieved Xen network reference %s" % network)
 
@@ -725,7 +741,7 @@ def main():
 	log.debug("Attempting to run pre-command")
 	#pre_command()
 	log.debug("Beginning main backup loop")
-	run_backup(session, network, config['dldir'], args.dryrun, vm_exclude=config['exclude'])
+	run_backup(session, network, config['dldir'], args.dryrun, config['transfermode'], vm_exclude=config['exclude'])
 
 if __name__ == '__main__':
 	main()
